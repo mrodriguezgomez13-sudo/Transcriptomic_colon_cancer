@@ -1,0 +1,18 @@
+---
+title: "PEC2_Perfil_transcriptómico_colon"
+author: "Mònica Rodríguez Gómez"
+date: "2026-06-10"
+output: html_document
+---
+
+```{r}
+#/ label: setup
+#/ include: false
+
+knitr::opts_chunk$set(
+  
+)
+```
+
+
+
