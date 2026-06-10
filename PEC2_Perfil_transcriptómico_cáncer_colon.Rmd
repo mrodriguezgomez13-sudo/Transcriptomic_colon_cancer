@@ -15,10 +15,4 @@ knitr::opts_chunk$set(
 ```
 
 
-xy
-```{r}
-x<-5
-c<-x^2
-d<-c-3
-```
 
