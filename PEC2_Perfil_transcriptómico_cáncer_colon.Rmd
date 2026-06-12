@@ -1,0 +1,615 @@
+---
+title: "PEC2_Perfil_transcriptómico_colon"
+author: "Mònica Rodríguez Gómez"
+date: "2026-06-10"
+output: html_document
+---
+
+
+## **1. Introducción y objetivos**
+
+El cáncer colorrectar (CRR) es un de los principals problemas de salud pública a nivel mundial, siendo el tercer cáncer más común y la segunda causa principal de mortalidad por cáncer en el mundo según la International Agency for Research on Cancer (IARC), perteneciente a la OMS (IARC, 2022). Además, una proporción importante de pacientes desarrolla recurrencias en el CCR y metástasis principalmente en el hígado y el pulmón lo que empeora considerablemente el pronóstico clínico (Cunningham et al., 2010).
+
+Diversos estudios han demostrado que los patrones de expresión génica reflejan la heterogeneidad biológica del CCR y permiten identificar firmas moleculares relacionadas con agresividad tumoral, capacidad metastásica y respuesta terapéutica. Por lo que la identificación de genes asociados a la tumorigénesis y progresión tumoral podría ser de ayuda en la predicción del pronóstico de los pacientes (Kim et al., 2014).
+
+El objetivo principal de esta PEC es realizar un análisis completo de expresión diferencial en datos de RNA-seq para comparar los genes expresados en el tejido de tumor colorrectal primario frente a los del colon normal. Para ello, se ha aplicado un filtrado, normalización y análisi estadístico. Posteriormente, se han identificado genes diferencialmente expresados y se ha generado un análisis de sobrerrepresentación funcional basado en Gene Ontology (GO), para determinar los procesos biológicos alterados en el cáncer colorrectal y los genes asociados.
+
+Todos los análisis de datos se realizaron en R (versión 4.5.1) utilizando paquetes de R/Bioconductor, incluyendo: `SummarizedExperiment`, `factoextra`, `edgeR`, `limma`, `clusterProfiler`, `org.Hs.eg.db` y `enrichplot`.
+
+## **2. Descripción de los datos**
+
+En este informe se analiza un conjunto de datos de expresión génica obtenidos mediante análisis transcriptómico mediante secuenciación de RNA (RNA-seq) de pacientes con CCR. El conjunto de datos se ha proporcionado en un archivo ya preparado, pero se basa en el estudio público con el código GEO Serie GSE50760 disponible en la base de datos Gene Expression Omnibus (GEO) del NCBI.
+
+El dataset original contiene un total de 39.376 genes de 54 muestras de tejido de colon normal, de tejido tumoral primario y de tejido metástasico hepático de 18 pacientes con CCR. Para cada paciente se dispone de muestras apareadas de los tres tipos de tejido, lo que permite controlar parcialmente la variabilidad interindividual.
+
+El dataset del archivo esta organizado en objeto de tipo `SummarizedExperiment` denominado `se` que incluye:
+
+- Cuatro matrices de expresión (`assays`): los conteos crudos (`counts`) y la expresión normalizada en log-CPM, TPM y FPKM. 
+
+- Información de anotación génica (`rowData`): el identificador del gen (`gene_id`), el símbolo génico (`gene_symbol`), una descripción funcional (`description`), el tipo de gen (`gene_type`), su localización cromosómica(`chrosome`), la anotación genómica del gen (`map_location`), el identificador Entrez (`entrez_id`) y su disponibilidad (`has_entrez`).
+
+- Información de las variables relevantes del diseño experimental (`colData`): principalmente principalmente el identificador GEO (`geo_accession`) el tipo de muestra (`sample_type`), el identificador del paciente (`patient_id`) y una variable de agrupación apareada (`pair_group`).
+
+```{r echo=FALSE,message=FALSE, warning=FALSE, results='hide'}
+# Cargamos la librería SummarizedExperiment
+library(SummarizedExperiment)
+
+# Cargamos el archivo a R
+load("PEC2_GSE50760_colorectal_SE.Rda")
+```
+
+## **3. Subconjunto de datos analizado**
+
+El análisis de datos se ha realizado sobre un subconjunto personalizado de pacientes (`se_sub`), cuya selección fue generada con una semilla aleatoria basada en mi identificador de la UOC (`1860891`), generando un valor reproducible mediante la función `set.seed()`. 
+
+A partir del conjunto completo de datos, se seleccionaron aleatoriamente 10 pacientes con las 3 muestras de tejidos:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+myseed <- sum(utf8ToInt("1860891")) 
+set.seed(myseed) 
+myseed
+
+patients <- unique(se$patient_id) 
+selected_patients <- sample(patients, 10) 
+
+se_sub <- se[, se$patient_id %in% selected_patients] 
+cat("dim:", paste(dim(se_sub), collapse = " "), "\n")
+table(se_sub$patient_id, se_sub$condition)
+```
+
+Los pacientes seleccionados son: AMC_10, AMC_12, AMC_13, AMC_19, AMC_2, AMC_20, AMC_21, AMC_23, AMC_24 y AMC_8.
+
+## **4. Análisis exploratorio**
+
+Para evaluar la distribución global de los datos y detectar posibles diferencias entre muestras, se realizó un análisis exploratorio sobre el subconjunto `se_sub` con los valores transformados en logCPM incluidos en el objeto `SummarizedExperiment`, ya que permiten visualizar adecuadamente la distribución y similitud entre muestras.
+
+En primer lugar, se generó un diagrama de caja con la función `boxplot` de los valores de expresión para todas las muestras (Figura 1).
+
+```{r echo=FALSE,fig.align = "center", fig.width=5, fig.height=4, out.width="80%", fig.cap="Boxplot de las muestras transcriptómicas."}
+# Dentro de assay cogemos la variable logCPM
+par(mar = c(10, 4, 4, 2))
+boxplot(assay(se_sub, "logCPM"),
+        ylab="Log2-CPM",
+        las = 2,
+        cex.axis=0.6,
+        main = "Distribución de expresión entre muestras")
+```
+
+A patir de los boxplots, vemos que las distribuciones son globalmente comparables entre las muestras. Aunque existen pequeñas diferencias entre medianas y dispersión, no se observan sesgos globales importantes ni desplazamientos extremos entre muestras. Además, se observan algunos valores extremos, esperables en datos de RNA-seq debido a la presencia de genes altamente expresados .Aun así, no se observan muestras con distribuciones claramente anómalas respecto al resto.
+
+Posteriormente, para visualizar la estructura global del conjunto de datos y explorar posibles agrupamientos según el tipo de tejido de la muestra (`normal`, `primary_tumor` y `liver_metastasis`) se realizó un análisis de componentes principales (PCA) (Figura 2). 
+
+```{r echo=FALSE, fig.align = "center", fig.width=6, fig.height=4, out.width="70%", fig.cap="Análisis de componentes principales (PCA) según la condición biológica."}
+# Generamos una funciñon plot para la pca
+# Y la pca con prcomp()
+plotPCA <- function(X, labels = NULL, colors = NULL,
+                    scale = FALSE, cex4text = 0.5, main="PCA") {
+  pc <- prcomp(X, scale. = scale)
+  plot(pc$x[,1], pc$x[,2],
+       col = colors,
+       pch = 16,
+       xlab = "PC1",
+       ylab = "PC2", 
+       main=main)
+    text(pc$x[,1], pc$x[,2],
+         labels = labels,
+         pos = 3,
+         cex = cex4text)
+  return(pc)
+}
+
+# Para las muestras
+# Concretamos la variable que queremos observar
+cond_colors <- factor(se_sub$sample_type)
+
+pca_muestras <- plotPCA(
+  t(assay(se_sub, "logCPM")),
+  colors = cond_colors,
+   labels = colData(se_sub)$patient_id,
+  main= "PCA: por muestra",
+  scale = TRUE)
+legend("bottomright",
+       legend = unique(se_sub$sample_type),
+       col = 1:length(unique(se_sub$sample_type)),
+       pch = 19)
+```
+
+El primer componente principal no muestra una separación clara entre condiciones (PC1), mientras que la mayor diferenciación entre grupos es en el segundo componente principal (PC2), oservándose una tendencia de separación entre los distintos tipos de muestra de tejido. Se observa una clara separación entre las muestras de tumor primario (`primary_tumor`) y las muestras de metástasis hepática (`liver_metastasis`), mientras que las muestras normales (`normal`) se localizan en una posición intermedia, mostrando solapamiento con ambos grupos tumorales. No obstante, se observan 3 puntos separados de las agrupaciones, correspondientes a: `metastasized_cancer_AMC_10-3`, `metastasized_cancer_AMC_19-3` y `metastasized_cancer_AMC_8-2`.
+
+De manera paralela, se generó un segundo análisis de PCA según el paciente, para evaluar un posible efecto del paciente. Este análisis no muestra una separación clara entre pacientes, indicando que no parecec ser un factor de afecte a la variabilidad global del conjunto de datos de manera significativa.
+
+En ambas PCA, para evitar que diferencias de varianza entre genes dominen el análisis y para garantizar una contribución equilibrada de todas las variables, se aplicó estandarización de los genes (`scale=TRUE`).
+
+Finalmente, para evaluar la similitud entre las muestras, se calculó la matriz de distancias auclidianas utilizando de nuevo los valores transformados (`logCPM`). En este análisis, los valores bajos indican mustras muy parecidas, mientras que lo valores elevados indican muestras diferentes. La visualización mediante heatmap (Figura 3) y clustering jerárquico (Figura 4) permitió identificar similitudes entre pacientes y consruir grupos en base a los resulados de la matriz de distancias entre las distintas condiciones experimentales, respectivamente .
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+library(factoextra)
+# Calculamos distancias entre muestras
+sampleDists <- dist(t(assay(se_sub, "logCPM")))
+```
+
+```{r echo=FALSE, fig.align = "center", fig.width=6, fig.height=4, out.width="80%",fig.cap="Heatmap de distancias entre muestras."}
+# Generamos el heatmap con la matriz de distancias
+fviz_dist(sampleDists,lab_size = 6)
+```
+
+En general, las muestras del tejido del colon normal presentan menor distancia entre sí en comparación con las muestras tumorales, lo que indica mayor homogeneidad transcriptómica. Las muestras tumorales, tanto primarias como metastásicas, muestran mayor heterogeneidad global. 
+
+Cabe destacar la muestra de `metastasized_cancer_AMC_10-3` que presenta distáncias especialmente elevadas respecto al resto de muestras, lo que sugiere un perfil transcriptómico claramente diferenciado. 
+
+```{r echo=FALSE, fig.align = "center", fig.width=5, fig.height=4, out.width="80%", fig.cap="Cluster jerárquico de las muestras."}
+plot(hclust(sampleDists), ,labels = se_sub$sample_title,
+     main = "Dendrograma de distancias entre muestras",
+     cex = 0.6)
+```
+
+Sin embargo, el clustering jerárquico no separa de forma completa las condiciones biológicas (tipo de muestra-paciente). Se observa la muestra `metastasized cancer AMC_13-3` agrupada con las muestras de tejido tumoral primario, y por otro lado, se observan las muestras `primary colorectal cancer AMC_19-1`, `primary colorectal cancer AMC_13-1` y `primary colorectal cancer AMC_8-1`agrupadas junto con las muestras de tejido de colon normales.
+
+En general, se observa una muestra con comportamiento atípico en varios análisis exploratorios: `metastasized_cancer_AMC_10-3`. Esta muestra aparece separada de las agrupaciones principales en el PCA y presenta distancias elevadas respecto al resto de muestras, aparece separada de las agrupaciones principales en el PCA, por lo que requiere especial atención.
+
+n conjunto, los análisis exploratorios muestran una tendencia general de agrupamiento asociada a la condición biológica de las muestras. Sin embargo, también se observa cierto solapamiento entre grupos y una elevada heterogeneidad transcriptómica, particularmente en las muestras tumorales.
+
+## **5. Preprocesado de los datos**
+
+El preprocesamiento incluyó la normalización y el filtrado de genes, para reducir el ruido técnico y asegurar que las muestras sean comparables.
+
+### **5.1. Filtrado de genes de baja expresión**
+
+Aquellos genes que tienen un nivel de expresión muy bajo, es decir que dan poca evidencia de expresión y podría interferir con métodos usados en pasos posteriores de este análisis, fueron eliminados. Para ello, se aplicó un filtrado de los conteos crudos (`counts`) obtenidos del objeto `SummarizedExperiment`.
+
+Previo al filtrado, se convirtieron los conteos en CPMs (counts per million) mediante la función `cpm()` del paquete `edgeR` para evitar un posile efecto debido a tamaños distintos de las librerías. A continuación, filtramos conservando los genes que se expresan a un CPM superior a 1 en al menos 5 muestras.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Cargamos la libreria de edgeR
+library(edgeR)
+```
+
+```{r echo=FALSE}
+# Empezamos con el filtraje de genes
+# Para filtrar genes usaremos counts
+# Número de lecturas originales
+counts <- assay(se_sub, "counts")
+
+# CPM
+counts_cpm <- cpm(counts)
+
+# Queremos conservar genes con CPM > 1 en al menos 5 muestras
+keep <- rowSums(counts_cpm > 1) >= 5
+
+# Número de lecturas tras el filtrado
+counts_filtr <- counts[keep, ]
+
+cat("Resumen del filtrado de genes\n")
+# Número de genes de antes
+dim(counts)
+# Número de genes después
+dim(counts_filtr)
+```
+
+Tras el filtrado, el número de genes se redujo de 39.376 a 18.424.
+
+### **5.2. Normalización de las muestras**
+
+Los datos se almacenaron en un objeto DGEList del paquete edgeR, que permite almacenar de forma estructurada los recuentos de expresión junto con información de las librerías de secuenciación (Ferrer et al., 2024). Y se realizó la normalización de las librerías utilizando el método TMM mediante la función `calcNormFactors()` .
+
+```{r echo=FALSE}
+dgeObj <- DGEList(counts = counts_filtr)
+dgeObj_norm <- calcNormFactors(dgeObj, method = "TMM")
+dgeObj_norm$samples
+```
+
+Se detectan valores bastante homogéneos en la mayoría de las muestras tras la normalización de los datos. Sin embargo, las muestras `metastasized_cancer_AMC_10-3` y `metastasized_cancer_AMC_19-3` presentan factores de normalización más bajos (norm.factors=0.568 y norm.factors=0.461, respectivamente), sugiriendo un perfil transcriptómico diferente.
+
+Posteriormente, los datos normalizados se transformaron nuevamente a escala logarítmica (`log2CPM`), corrigiendo los sesgos técnicos y obteniendo distribuciones comparables entre muestras, y se realizó un análisis de componentes principales (PCA).
+
+```{r echo=FALSE}
+# Para ver si la normalización mejora el clustering hacemos PCA
+log2CPM <- cpm(dgeObj_norm, log = TRUE)
+pca2 <- prcomp(t(log2CPM), scale = FALSE)
+```
+
+De forma consistente, tras aplicar filtrado de baja expresión y normalización TMM, la estructura global de los datos permanece asociada a la condición biológica de las muestras. 
+
+A lo largo del filtrado y la normalización se sigue destacando el comportamiento diferencial de la muestra `metastasized_cancer_AMC_10-3`, pero dado que las muestras de tejido metastásico hepático son excluidas en el análisis diferencial, no se consideró necesario eliminar la muestra.
+
+El método de normalización aplicado, llamado Trimmed Mean of M-values (TMM), resulta adecuado para estos datos de RNA-seq porque corrige diferencias en el tamaño de las librerías y en la composición transcriptómica entre muestras, lo que ofrece una mejor comparación ente niveles de expresión (Ferrer et al., 2024).
+
+## **6. Modelo y diseño experimental**
+
+El estudio original contiene muestras de tejido de colon normal, de tejido tumoral primario y de tejido metástasico hepático procedentes del mismo paciente. Esto implica que existe una dependencia biológica entre las muestras compartiendo carcterísticas propias del individuo. Por tanto, las muestras son apareadas por paciente y no pueden ser tratadas de manera independiente, debido a que podría introducir variabilidad no relacionada con al condición tumoral.
+
+Sin embargo, para este trabajo se seleccionaron únicamente las muestras de tejido de colon normal y de tejido tumoral primario. 
+
+Para poder llevar a cabo el análisis se construyó un nuevo subconjunto (`se_pn`) del subconjunto personalizado (`se_sub`), a partir de la variable `condition` incluida en `colData`, seleccionando únicamente las muestras deseadas:
+
+```{r echo=FALSE}
+se_pn <- se_sub[, se_sub$condition %in% c("normal", "primary_tumor")]
+```
+
+A continuación, las variables `condition` y `patient_id` se transformaron a tipo factor y se eliminaron los niveles no utilizados mediante `droplevels()`:
+
+```{r echo=FALSE}
+# Convertimos a factor
+se_pn$condition  <- factor(se_pn$condition)
+se_pn$patient_id <- factor(se_pn$patient_id)
+
+# Eliminamos losniveles no necesarios
+se_pn$condition <- droplevels(se_pn$condition)
+se_pn$patient_id <- droplevels(se_pn$patient_id)
+se_pn
+table(se_pn$condition)
+```
+
+Definimos la matriz de diseño sobre el contraste de interés utilizando la función `model.matrix()` de la librería `limma`.
+
+```{r echo=FALSE, warning=FALSE}
+library(limma) 
+```
+
+```{r echo=FALSE}
+# Matriz de diseño con ~patient_id + condition
+design <- model.matrix(~ patient_id + condition, data = colData(se_pn))
+```
+
+El modelo definido incluye las variables `patient_id` con `condition`, de manera que el análisis tiene en cuenta la variabilidad interindividual de los pacientes comparando así, las diferencias específicas de expresión génica asociadas a la condición biológica de las muestras. Debido a esto, obtenemos el coeficiente `conditionprimary_tumor` que representa el efecto asociado al tejido tumoral primario respecto al tejido normal del colon después de descontar la variabilidad de cada paciente.
+
+Finalmente, se definió una matriz de contrastes mediante la función `makeContrasts()`, especificando la comparación de interés a partir del coeficiente `conditionprimary_tumor`. De este modo, el contraste `TumorVsNormal` permite realmente evaluar las diferencias de expresión génica entre tejido tumoral primario y tejido normal de colon. 
+
+```{r echo=FALSE, warning=FALSE ,message=FALSE}
+# Contrastes
+cont.matrix <- makeContrasts(TumorVsNormal = conditionprimary_tumor,
+  levels = design)
+cont.matrix
+```
+
+## **7. Expresión diferencial**
+
+Una vez que hemos normalizado los datos y generada la matriz de diseño, pasamos a seleccionar los genes diferencialmente expresados. Se realizó un análisis de expresión diferencial utilizando el paquete `limma` junto con la transformación `voom`, para estabilizar la relación media-varianza de los datos normalizados (`dgeObj_norm`), incorporando el diseño experimental apareado previamente definido (`design`).
+
+Debido a que en el diseño experimental se restringió únicamente a las muestras normales y de tumor primario, fue necesario repetir el filtrado, la normalización y la modelización utilizando exclusivamente este nuevo subconjunto de muestras (`dgeObj_norm_pn`). Esto garantiza la coherencia entre el número de filas de la matriz de expresión (`v`) y el número de columnas del diseño experimental.
+
+```{r echo=FALSE}
+# Extraemos la matriz de counts para las muestras seleccionadas 
+counts_pn <- assay(se_pn, "counts") 
+
+# Filtramos conservando CPM > 1 en al menos 5 muestras 
+keep_pn <- rowSums(cpm(counts_pn) > 1) >= 5 
+counts_pn <- counts_pn[keep_pn, ] 
+
+# Creamos el objeto DGEList 
+# aplicamos la normalización 
+dgeObj_pn <- DGEList(counts_pn) 
+dgeObj_norm_pn <- calcNormFactors(dgeObj_pn)
+
+# matriz de diseño
+design <- model.matrix(~ patient_id + condition, data = colData(se_pn))
+
+# Transformamos los datos con voom
+# Modela la relación media-varianza
+v <- voom(dgeObj_norm_pn, design)
+```
+
+El objeto voom resultante (`v`) contiene los datos de conteo transformados a log2-CPM que ya pueden ser usados para ajustar el modelo lineal a través de la función `lmFit` incorporando tambiñen, la matriz de contraste *Tumor vs Normal* (`cont.matrix`). Posteriormente, se aplicó el método de Empirical Bayes a estos contrastes con la función `eBayes` para estabilizar las varianzas estimadas. 
+
+```{r echo=FALSE}
+# Comparamos tumor vs normal
+fit <- lmFit(v, design)
+
+# Ajustamos el modelo lineal
+fit.cont <- contrasts.fit(fit, cont.matrix)
+
+# Regularizamos el estimador del error con la función eBayes
+fit.cont <- eBayes(fit.cont)
+```
+
+Extraímos los resultados del análisis de expresión diferencial mediante la función `topTable`:
+
+```{r echo=FALSE}
+# Genes diferencialmente expresados obtenidos con Top tables
+toptab_cancer <- topTable(fit.cont, coef = "TumorVsNormal",number = Inf,
+                          sort.by = "P")
+#head(toptab_cancer)
+```
+
+Posteriormente, filtramos la lista de genes diferencialmente expresados en base a un umbral de significación estadística de p-valor corregido por FDR menor a 0.05 y un Fold Change absoluto ($|log2FC|$) mayor a 2. 
+
+```{r echo=FALSE}
+# Definimos la lista principal de genes diferencialmente expresados
+# Aplicamos el criterio
+gen_exp <- toptab_cancer[toptab_cancer$adj.P.Val < 0.05 & 
+                       abs(toptab_cancer$logFC) > 2,]
+#head(gen_exp)
+```
+
+```{r echo=FALSE}
+n_total <- nrow(gen_exp)
+up <- sum(gen_exp$logFC > 2)
+down <- sum(gen_exp$logFC < -2)
+
+# Resultados
+cat("Resumen de genes diferencialmente expresados\n")
+cat("Total:", n_total, "\n")
+cat("Sobreexpresados en tumor (log2FC > 2):", up, "\n")
+cat("Infraexpresados en tumor (log2FC < -2):", down, "\n")
+```
+A partir del conjunto filtrado, se identificaron un total de 583 genes diferencialmente expresados entre tejido tumoral primario y tejido normal de colon, de los cuales 296 genes se encontraron sobreexpresados y 287 genes infraexpresados. 
+
+Los 10 genes más relevantes, ordenados según el valor absoluto del log2FC.
+
+```{r echo=FALSE}
+# Los 10 genes más importantes
+genes_10 <- head(gen_exp[order(abs(gen_exp$logFC), decreasing = TRUE), ], 10)
+genes_10
+```
+
+Finalmente, se representaron gráficamente los resultados mediante un Volcano plot con la función `volcanoplot`, que muestra los genes diferencialmente expresados en función de sus valores de fold change y FDR; cuyo umbral de FDR (2 a -2) está delimitado por las líneas verticales azules, por tanto nos interesan los genes que se encuentran fuera de este umbral. Mientras que para fold change, nos interesan los que se encuentren por encima de la línea hosirontal (Figura 5).
+
+```{r echo=FALSE, fig.align = "center", fig.width=6, fig.height=4, out.width="80%", fig.cap="Volcano plot del análisis de expresión diferencial ntre tejido tumoral primario y tejido normal de colon."}
+volcanoplot(fit.cont,
+            coef = "TumorVsNormal",
+            highlight = 10,
+            names = rownames(fit.cont),
+            main = "Tumor vs Normal")
+# Añadimo las lineas que marcan los genes 
+# sobre e infraexpresados en tumor
+abline(v = c(-2, 2), col = "blue", lty = 2)
+abline(h = -log10(0.05), col = "blue", lty = 2)
+```
+
+Puede observarse que la mayoría de los genes se sitúan fuera de los umbrales de significación establecidos, confirmando que solo una fracción pequeña del transcriptoma presenta cambios de expresión suficientemente intensos y consistentes para cumplir los criterios de FDR y log2FC.
+
+## **8. Análisis de significación biológica **
+
+Por último, realizamos un análisis de significación biológica para analizar en qué rutas están implicados los genes que hemos obtenido en los análisis anteriores.
+
+### **8.1. Anotación de genes**
+
+Primero, los genes se anotaron a partir de la información de anotación génica (`rowData`) diponible en el objeto `SummarizedExperiment`. Tras comprobar la correcta disponibilidad de anotación para todos los genes diferenicialmente expresados, se integró la información con el identificador *entrez_id*.
+
+```{r echo=FALSE,}
+# Número total de genes vs con Entrez válido
+cat(  "Genes totales:", nrow(se_sub),
+  "\nGenes con Entrez ID válido:", sum(!is.na(rowData(se_sub)$entrez_id)),
+  "\n")
+```
+
+
+```{r echo=FALSE}
+# Necesitamos las anotaciones del objeto incial
+annot <- as.data.frame(rowData(se))
+annot$entrez_id <- rownames(annot)
+
+# Y necesitamos las anotaciones de toptab_cancer
+toptab_cancer$entrez_id <- rownames(toptab_cancer)
+
+# Unimos en una tabla
+toptab_cancer_annot <- merge(toptab_cancer, annot, by = "entrez_id")
+
+# Indicamos los 10 genes más importantes según el criterio de 2.6
+genes_anot <- subset(toptab_cancer_annot,
+                adj.P.Val < 0.05 & abs(logFC) > 2)
+
+genes_10_anot<- genes_anot[order(abs(genes_anot$logFC), 
+                                    decreasing = TRUE), ][1:10, ]
+genes_10_anot
+```
+
+Los genes diferencialmente expresados más relevantes identificados son: CST1 (*cystatin SN*), MMP7 (*matrix metallopeptidase 7*), COL10A1 (*collagen type X alpha 1 chain*), OTOP3 (*otopetrin 3*), REG1B (*regenerating family member 1 beta*), WNT2 (*Wnt family member 2*), KRT80 (*keratin 80*), OTOP2 (*otopetrin 2*), KRT17 (*keratin 17*) y COL11A1 (*collagen type XI alpha 1 chain*). 
+
+Todos estos genes se encuentran significativamente sobreexpresados en las muestras de tumor primario respecto al tejido normal, a excepción de OTOP3 y OTOP2, que presentaron valores negativos de logFC (-6,429 y -6.082, respectivamente), indicando una infraexpresión en tumor respecto al tejido normal.
+
+### **8.2. Análisis de sobrerrepresentación (ORA)**
+
+### **Genes sobreexpresados**
+
+
+Después de anotar los genes diferencialmente expresados, se utilizaron los identificadores para mapearlos a vías biológicas conocidas mediante un análisis de sobrerrepresentación (ORA). Se utilizaron los 296 genes sobreexpresados como lista de entrada para el análisis ORA, mientras que para el conjunto de fondo (universe) se utilizaron los 17.651 genes filtrados en el análisis de expresión diferencial.
+
+El análisis se realizó con la función `enrichGO()` del paquete `clusterProfiler`, utilizando la base de datos de anotación humana `org.Hs.eg.db` y los identificadores *entrez_id*. Para clasifiar os genes según funciones y procesos biológicos compartidos se utilizó la base de datos Gene Ontology (GO). En concreto, el análisis se restringió al dominio Biological Process (BP), que agrupa procesos celulares y fisiológicos en los que participan los genes. De nuevo, se aplicó el método BH (Benjamini-Hochberg) para ajustar el p-valor y controlar la tasa de falsos positivos. Por otro lado, el argumento `readable=TRUE` convierte automáticamente los resultados en *gene_symbol*, facilitando la interpretación biológica.
+
+```{r message=FALSE, warning=FALSE}
+# Cargamos las librerías para el cluster y de la especie humano
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+```{r echo=FALSE}
+# Seleccionamos toptab_cancer: todos los 
+# genes diferencialmente expresados 
+# en tumor primario respecto a colon normal.
+universe_genes <- rownames(toptab_cancer)
+```
+
+```{r echo=FALSE}
+# Seleccionamos genes sobreexpresados
+genes_anot_sobr <- subset(toptab_cancer_annot, 
+                          adj.P.Val < 0.05 & logFC >2)
+
+entrez_up_sobr<-genes_anot_sobr$entrez_id
+```
+```{r echo=FALSE}
+ego <- enrichGO(gene = entrez_up_sobr,
+  universe = universe_genes,
+  OrgDb= org.Hs.eg.db,
+  keyType= "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE)
+ego_df <- as.data.frame(ego)
+ego_rel <- ego_df[order(ego_df$p.adjust), ][1:10, ]
+# Tabla
+# Acortamos la columna geneID a los primeros 5 genes
+ego_rel$geneID <- sapply(strsplit(ego_rel$geneID, "/"),
+  function(x) paste(head(x, 5), collapse = ", "))
+
+ego_rel[, c("Description", "p.adjust", "geneID", "GeneRatio")]
+```
+
+```{r echo=FALSE}
+nrow(as.data.frame(ego))
+```
+Se identificaron 152 términos significativamente enriquecidos (FDR < 0.05). 
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center", fig.width=6, fig.height=4, out.width="80%",fig.cap="Dotplot de procesos biológicos enriquecidos en genes sobreexpresados en tumor identificados mediante análisis de ontología génica (GO)."}
+# Dotplot de los 10 términos más enriquecidos
+dotplot(ego, showCategory=10, font.size=7)
+```
+Entre los procesos biológicos más enriquecidos destacan procesos relacionados con la matriz extracelular (*extracellular matrix organization, extracellular structure organization, extracellular matrix disassembly*), con el encapsulamiento de estructuras celulares que se encuentran fuera del plasma (*external encapsulating structure organization*). También aparecen enriquecidos procesos relacionados con la morfogénesis epitelial (*morphogenesis of an epithelium*), la queratinización (*keratinization*) y el desarrollo tisular (*skin development*) (Figura 6).
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center",out.height="40%",  out.width="80%",fig.cap="Cnetplot del análisis de sobrerrepresentación funcional de genes sobreexpresados."}
+library(enrichplot)
+ego_sim <- pairwise_termsim(ego)
+cnetplot(ego_sim)
+# Yu et al., 2012
+```
+
+El análisis de enriquecimiento se complementó con una visualización mediante cnetplot, que permite explorar la relación entre los términos GO significativos y los genes que contribuyen a cada uno de ellos (Figura 7). 
+
+Oservamos un primer módulo claramente agrupado formado por diferentes procesos asociados a la matriz extracelular (*extracellular matrix organization, extracellular matrix disassembly, extracelular structure organization* y *external encapsulating structure organization*), que aparecen fuertemente interconectados. Este grupo comparte un conjunto amplio de genes como COL1A1, COL4A1, COL11A1, MMP1, MMP3, P4HA3 y FAP, lo que explica su alta interdependencia en la red.
+
+Por otro lado, se observa un segundo bloque más separado correspondiente al término *morphogenesis of an epithelium*, que agrupa varios genes como  KRT17, BMP9, CA9 o CTHRC1.
+
+Además, algunos genes actúan como elementos de conexión entre ambos módulos, destacando SERPINB5, SULF1 y ADAMTS12, que aparecen asociados entre los procesos de remodelación de matriz extracelular y los procesos de morfogénesis epitelial. 
+
+### **Genes infraexpresados**
+
+
+Se realizó un segundo análisis de sobrerrepresentación funcional, con la función `enrichGO()` aplicando los mismos argumentos pero sobre los genes infraexpresados.
+
+```{r echo=FALSE}
+# Seleccionamos genes sobreexpresados
+genes_anot_infr <- subset(toptab_cancer_annot, 
+                          adj.P.Val < 0.05 & logFC< -2)
+
+entrez_infr<-genes_anot_infr$entrez_id
+```
+```{r echo=FALSE}
+ego_inf <- enrichGO(gene = entrez_infr,
+  universe = universe_genes,
+  OrgDb= org.Hs.eg.db,
+  keyType= "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE)
+ego_df_inf <- as.data.frame(ego_inf)
+ego_rel_inf <- ego_df_inf[order(ego_df_inf$p.adjust), ][1:10, ]
+
+# Tabla
+# Acortamos la columna geneID a los primeros 5 genes
+ego_rel_inf$geneID <- sapply(strsplit(ego_rel_inf$geneID, "/"),
+  function(x) paste(head(x, 5), collapse = ", "))
+
+ego_rel_inf[, c("Description", "p.adjust", "geneID", "GeneRatio")]
+```
+
+```{r echo=FALSE}
+nrow(as.data.frame(ego_inf))
+```
+Se identificaron 32 procesos biológicos significativamente enriquecidos.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center", fig.width=6, fig.height=4, out.width="80%",fig.cap="Dotplot de procesos biológicos enriquecidos en genes sobreexpresados en tumor identificados mediante análisis de ontología génica (GO)."}
+# Dotplot de los 10 términos más enriquecidos
+dotplot(ego_inf, showCategory=10, font.size=7)
+```
+
+
+Entre los términos más representados destacan procesos relacionados con el transporte de componentes: *inorganic anion transport*, *chloride transport*, *one-carbon compound transport*, *sodium ion transmembrane transport*, *monoatomic anion transport*, *sodium ion transport* y *gas transport*. También se observan procesos relacionados con la respuesta inmune: *immunoglobulin mediated immune response*, *B cell mediated immunity* y, *leukocyte mediated immunity* (Figura 8).
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center",out.height="40%",  out.width="80%",fig.cap="Cnetplot del análisis de sobrerrepresentación funcional de genes sobreexpresados."}
+library(enrichplot)
+ego_sim_inf <- pairwise_termsim(ego_inf)
+cnetplot(ego_sim_inf)
+# Yu et al., 2012
+```
+
+En la visualización mediante cnetplot de los genes infraexpresados se observan tres módulos funcionales claramente diferenciados. El primero está asociado al proceso *one-carbon compound transport*, donde tenemos los genes: HBA1, HBA2, HBD, HBB, AQP8 y CA2. El segundo módulo es *sodium ion transmembrane transport*, donde se incluyen genes como diferentes SLCs, OSR1, TRPV3, SCNN1G y SCNN1B.
+
+El tercer módulo corresponde a un conjunto muy interconectado formado por *chloride transport*, *inorganic anion transport* y *monoatomic anion transport*. En este grupo aparecen genes como PRKG2, CLCA1, CLCA4, SLC26A2 y SLC26A3. Además, algunos genes muestran interacciones compartidas entre este módulo y el relacionado con el transporte transmembrana de sodio, sugiriendo una conexión funcional entre distintos mecanismos de transporte iónico alterados en el tejido tumoral. De forma similar, el gen CA2 actúa como punto de conexión entre el módulo de *one-carbon compound transport* y el conjunto de procesos relacionados con transporte de aniones y cloro (Figura 9).
+
+Por otro lado, aunque no aparecen representados de forma destacada en el cnetplot, el análisis también mostró enriquecimiento de procesos relacionados con la respuesta inmune. Principalmente destacan genes como IGLL5 y diferentes genes de la familia IGHV, lo que podría reflejar alteraciones locales en mecanismos de respuesta inmune.
+
+## **9. Discusión y conclusiones**
+
+En este informe hemos realizado un análisis completo de expresión diferencial y enriquecimiento funcional en tejido de cáncer colorrectal primario frente a tejido normal de colon, controlando la variabilidad interindividual.
+
+En el análisis de expresión diferencial se identificaron 583 genes diferencialmente expresados, con una distribución equilibrada entre genes sobreexpresados e infraexpresados en tumor. Una fracción pequeña en comparación con los 18.424 obtenidos tras el filtrado. ESto podría indicar que la tumorigénesis está concentrado en subconjuntos específicos del transcriptoma. Aunque, por otro lado, también podría indicar que el criterio de filtrado es demasiado estricto, por lo que se podría probar de ampliar el umbral de log2FC.
+
+De este análisis, se obtuvo los genes más expresados de entre los cuales se pudo identificar algunos conjuntos de genes con funciones estrechamente relacionadas con la remodelación del microambiente tumoral y la progresión del cáncer y la interacción entre células tumorales y estromales.
+
+Entre los conjuntos de genes sobreexpresados estos destacan COL10A1, COL11A1, pertenecientes a la familia de colágenos, donde COL10A1 ha sido descrito como un componente característico de fibroblastos asociados a cáncer (CAFs), con una expresión elevada en tumores colorrectales avanzados (Hu et al., 2025), así como la activación de procesos de transición epitelio-mesénquima (EMT), favoreciendo la disociación del tumor primario y migración (Yi et al., 2014). Por lo que aquellos pacientes con elevada expresión de este gen estaría relacionado con muy avanzado de cáncer, que se podría tratar de analizar con las muestras de pacientes con metástasis.
+
+De forma similar, la sobreexpresión de MMP7 ha sido ampliamente descrita como una metaloproteinasa sobreexpresada en cáncer colorrectal, presente en una gran proporción de tumores y asociada a un peor pronóstico en estadios avanzados. Funcionalmente, MMP7 partcipa en la degradación de componentes de la matriz extracelular, facilitando la invasión de las células tumorales. Además, puede activar otras metaloproteinasas, amplificando la capacidad invasiva del tumor (Said et al., 2014).
+
+La sobreexpresión de Wnt2 también resulta coherente ya que la activación de la vía de señalización Wnt, una de las alteraciones moleculares más características del cáncer colorrectal asociandose también con peores pronósticos y mayor capacidad metastásica. Se ha descrito que WNT2 activa la vía de señalización canónica Wnt/$\beta$-catenina en células tumorales y fibroblastos, favoreciendo tanto la activación de vías implicadas en la proliferación y la diferenciación celular, así como una capacidad más migratoria (Kramer et al., 2017).
+
+En contraste, OTOP2 y OTOP3, que se resultan infraexpresados, han sido descritos como genes con funciones relevantes en la regulación de la proliferación tumoral, el metabolismo celular y la respuesta inmune.
+Mientras OTOP2 ha sido identificado como un posible gen supresor tumoral en cáncer colorrectal y su expresión se ha relacionado con la inhibición de procesos de proliferación, migración, invasión y adhesión celular, lo que sugiere un papel protector frente a la progresión tumoral (Lu et al., 2024), y por tanto la infraexpresión en este análisis podría reflejar una pérdida de estos mecanismos reguladores en el tejido tumoral. La inhibición de OTOP3 induce ferroptosis, un tipo de muerte celular que parecen causar una reprogramación del metabolismo energético hacia un fenotipo más dependiente del efecto Warburg, característico de células tumorales altamente proliferativas (Lee et al., 2025).
+
+En cuanto al análisis sigificación biológica, la visualización mediante cnetplot muestra una estructura modular clara. Por un lado, conjunto muy interconectado asociado a la organización de la matriz extracelular, pues la composición y dinámica de la matriz extracelular en cáncer colorrectal se ha asociado con la heterogeneidad tumoral y con la capacidad metastásica, reflejando la importancia del microambiente en la evolución de la enfermedad (Karlsson & Nyström, 2022). Y, donde encontramos alguno de los genes más sobreexpresados junto con otros de las mismas famílias (COL1A1, COL4A1, COL11A1, MMP1, MMP3, MMP7, MMP11). En concreto, se ha descrito que las MMPs desempeñan un papel clave en la degradación de componentes de la matriz extracelular y en la activación de otras proteasas, lo que contribuye directamente a la progresión tumoral (Kim et al., 2021; Li et al., 2020). 
+
+Por otro lado, un segundo módulo relacionado con la morfogénesis del epitelio celular en el que destacan genes como WNT2. Este enriquecimiento es coherente con la implicación de la vía Wnt en la regulación del desarrollo intestinal y en la progresión del cáncer colorrectal. Se ha descrito que la activación de esta vía de manera moderada se asocia con patrones de crecimiento epitelial organizados, mientras que una mayor activación favorece la adquisición de fenotipos menos diferenciados y con características que promueven la invasión y diseminación tumoral (Brabletz et al., 2002). Además, varios genes de la familia KRT también han sido identificados en el análisis funcional, junto con KRT16, mostrando una posible implicación en los procesos de reorganización epitelial asociados a la progresión tumoral. En este sentido, se ha descrito que múltiples genes relacionados con la vía Wnt, incluyendo reguladores como NOTUM y distintos genes de queratinas (KRT), están correlacionados con procesos de metástasis en cáncer colorrectal (Xu et al., 2022). Además, estudios recientes en modelos de transformación epitelial han demostrado que la desregulación de KRT, que parecen tener función relacionada con la organización de filamentos intermedios, está estrechamente vinculada a procesos de EMT en los que las células adquieren un fenotipo más fibroblastoide, con mayor capacidad migratoria e invasiva (Klein et al., 2024). Por lo que la sobreexpresión de estos genes, estaría relacionada con la reprogramación del epitelio que facilitarían la progresión y migración tumoral.
+
+El análisis de los genes infraexpresados en tejido tumoral de cáncer colorrectal revela un enriquecimiento claro de procesos biológicos relacionados con el transporte de aniones y cationes, lo que sugiere una pérdida de funciones fisiológicas propias del epitelio del colon en estado normal, especialmente relacionadas con el transporte de cloro, sodio y otros iones necesarios para la regulación del entorno luminal y el mantenimiento de la hidratación tisular, así como del balance enter fluidos.
+
+Este patrón es consistente con lo descrito para miembros de la familia de las aquaporinas, en particular AQP8, que se expresa predominantemente en epitelio del colon normal y se encuentra disminuido en carcinoma colorrectal. AQP8 participa en el transporte de agua y en el mantenimiento de la función fisiológica del colon, mientras que su pérdida se asocia a progresión tumoral (Wu et al., 2018). Por el contario, aunque no aparece en nuestros resultados, AQP5 presentan el patrón opuesto, con sobreexpresión en cáncer y asociación a procesos de invasión y progresión (Wang et al., 2012), lo que refuerza la idea de un cambio funcional en el tipo de transporte acuoso durante la progresión de las células hacia tumorales.
+
+Tambiñen destacan los genes asociados al transporte de cloro y a la regulación de la homeostasis epitelial CLCA1 y CLCA4 que, en condiciones normales, contribuyen al equilibrio iónico, la comunicación celular y el mantenimiento de la diferenciación epitelial. Nuestros resultados muestran que estos genes estan infraexpresados, es decir, han sufrido una pérdida de funciones. Además, CLCA1 ha sido descrito como un posible gen supresor tumoral, ya que su expresión reduce la proliferación celular y la capacidad invasiva, en parte mediante la regulación de la vía Wnt/$\beta$-catenina y la EMT (Li et al., 2017). De forma similar, CLCA4 también se ha relacionado con la inhibición de la EMT y de la proliferación tumoral. Su disminución puede favorecer la pérdida de adhesión celular y el aumento de la migración (Jin et al., 2020; Wei et al., 2020). Además, diversos estudios han mostrado que la infraexpresión de CLCA4 es un evento progresivo desde tejido normal hacia adenoma y carcinoma, lo que refuerza su posible papel como marcador temprano de transformación tumoral.
+
+La infraexpresión de CLCA1 y CLCA4 parece complementar los cambios observados en el módulo de morfogénesis epitelial; mientras la activación de la vía Wnt y de genes como WNT2 o KRT se asocia a un fenotipo más migratorio y desorganizado, la disminución de CLCA1 y CLCA4 refuerza la idea de una desregulación del epitelio.
+
+Aunque no se ha encontado infromación bre los genes IGLL5 y los diferenstes IGHVs expresados, si se ha encontrado sobre CHGA, también presente en los resultados.  
+
+CHGA es una proteína asociada a células neuroendocrinas, donde participa en procesos de almacenamiento y liberación de proteínas, y utilizada en distintos estudios como biomarcador de diagnóstico temprano en varios tipos de cáncer (Zhang et al., 2022). En cáncer colorrectal se ha observado que su expresión disminuye en fases iniciales de la enfermedad, teniendo sentido su infraexpresión en las muestras utilizadas, pues parece estar relacionado con la transición hacia un estado tumoral. 
+
+La obtención de genes infraexpresados asociados a la respuesta inmune sugiere un cambio importante hacia la pérdida de la respuesta inmunológica en el microambiente tumoral. En condiciones normales, el intestino presenta una respuesta inmunitaria activa y equilibrada, en la que las células B desempeñan un papel clave mediante la producción de inmunoglobulinasque contribuyen a la defensa frente a antígenos y microorganismos. Sin embargo, en el estado tumoral se ha descrito una reorganización del repertorio de células B y de sus inmunoglobulinas, desde una respuesta IgA hacia una respuesta más dominada por IgG, asociada a un entorno inflamatorio (Liu et al., 2023).
+
+En conjunto, los resultados obtenidos muestran alteraciones en la expresión génica coherentes con procesos conocidos del cáncer colorrectal. La sobreexpresión de genes relacionados con la matriz extracelular, la via Wnt y la migración celular, junto con la infraexpresión de genes implicados en transporte iónico, homeostasis epitelial y respuesta inmune, sugiere una reprogramación general en el tejido tumoral.
+
+## **10. Referencias**
+
+1. Brabletz, T., Jung, A., & Kirchner, T. (2002). $\beta$-Catenin and the morphogenesis of colorectal cancer. *Virchows Archiv, 441*(1), 1–11. https://doi.org/10.1007/s00428-002-0642-9
+
+2. Cunningham, D., Atkin, W., Lenz, H. J., Lynch, H. T., Minsky, B., Nordlinger, B., & Starling, N. (2010). Colorectal cancer. *The Lancet, 375*(9719), 1030–1047. https://doi.org/10.1016/S0140-6736(10)60353-4
+
+3. Ferrer, M., Gonzalo, R., & Sanchez, A. (2024, diciembre). *Workflow de análisis de expresión diferencial usando RNA-seq*. GitHub Pages. https://aspteaching.github.io/Analisis_de_datos_omicos-Ejemplo_2-RNASeq/Workflow_basico_de_RNASeq.html#5_Preprocesado_de_los_datos
+
+4. Hu, S., Ding, M., Lou, J., Qin, J., Chen, Y., Liu, Z., Li, Y., Nie, J., Xu, M., Sun, H., Gu, X., Xu, T., Wang, S., Wang, S., & Pan, Y. (2025). COL10A1+ fibroblasts promote colorectal cancer metastasis and M2 macrophage polarization with pan-cancer relevance. *Journal of Experimental & Clinical Cancer Research, 44*(1), 243. https://doi.org/10.1186/s13046-025-03510-8
+
+5. International Agency for Research on Cancer. (2022). *Global Cancer Observatory*. World Health Organization. https://gco.iarc.who.int/today/en/dataviz/pie?mode=population&multiple_cancers=1&cancers=39_41&populations=900&group_populations=0&sort_by=value0&key=total&age_end=14&types=1&group_cancers=1
+
+6. Karlsson, S., & Nyström, H. (2022). The extracellular matrix in colorectal cancer and its metastatic settling – Alterations and biological implications. *Critical Reviews in Oncology/Hematology, 175*, 103712. https://doi.org/10.1016/j.critrevonc.2022.103712
+
+7. Kim, S. K., Kim, S. Y., Kim, J. H., Roh, S. A., Cho, D. H., Kim, Y. S., & Kim, J. C. (2014). A nineteen gene-based risk score classifier predicts prognosis of colorectal cancer patients. *Molecular Oncology, 8*(8), 1653–1666. https://doi.org/10.1016/j.molonc.2014.06.016
+
+8. Kim, M. S., Ha, S. E., Wu, M., Zogg, H., Ronkon, C. F., Lee, M. Y., & Ro, S. (2021). Extracellular matrix biomarkers in colorectal cancer. *International Journal of Molecular Sciences, 22*(17), 9185. https://doi.org/10.3390/ijms22179185
+
+9. Klein, C., Ramminger, I., Bai, S., Steinberg, T., & Tomakidi, P. (2024). Impairment of intermediate filament expression reveals impact on cell functions independent from keratinocyte transformation. *Cells, 13*(23), 1960. https://doi.org/10.3390/cells13231960
+
+10. Kramer, N., Schmöllerl, J., Unger, C., et al. (2017). Autocrine WNT2 signaling in fibroblasts promotes colorectal cancer progression. *Oncogene, 36*, 5460–5472. https://doi.org/10.1038/onc.2017.144
+
+11. Lee, Y. J., Han, Y. J., Oh, J. J., et al. (2025). OTOP3 functions as an oncogenic regulator of ferroptosis-mediated colorectal cancer progression. *Genes & Genomics, 47*, 911–922. https://doi.org/10.1007/s13258-025-01657-4
+
+12. Li, X., Hu, W., Zhou, J., Huang, Y., Peng, J., Yuan, Y., Yu, J., & Zheng, S. (2017). CLCA1 suppresses colorectal cancer aggressiveness via inhibition of the Wnt/$\beta$-catenin signaling pathway. *Cell Communication and Signaling, 15*, 38. https://doi.org/10.1186/s12964-017-0192-z
+
+13. Li, Z. L., Wang, Z. J., Wei, G. H., Yang, Y., & Wang, X. W. (2020). Changes in extracellular matrix in different stages of colorectal cancer and their effects on proliferation of cancer cells. *World Journal of Gastrointestinal Oncology, 12*(3), 267–275. https://doi.org/10.4251/wjgo.v12.i3.267
+
+14. Liu, R.X., Wen, C., Ye, W., Li, Y., Chen, J., Zhang, Q., Li, W., Liang, W., Wei, L., Zhang, J., Chan, K.W., Wang, X., Yang, X., & Liu, H (2023). Altered B cell immunoglobulin signature exhibits potential diagnostic values in human colorectal cancer. *Iscience, 26*(3).
+
+15. Lu, C., Chen, S., Liu, S., Liu, H., Sun, L., & Sun, Y. (2024). Determination of the immunomodulatory role of OTOP2 in colon adenocarcinoma. *Journal of Cancer, 15*(15), 4838–4852. https://doi.org/10.7150/jca.95622
+
+16. Said, A. H., Raufman, J. P., & Xie, G. (2014). The role of matrix metalloproteinases in colorectal cancer. *Cancers, 6*(1), 366–375. https://doi.org/10.3390/cancers6010366
+
+17. Xu, Y., Wang, X., Chu, Y., Li, J., Wang, W., Hu, X., Zhou, F., Zhang, H., Zhou,L., Kuai, R., Jin, Y., Yang, D., & Peng, H. (2022). Analysis of transcript-wide profile regulated by microsatellite instability of colorectal cancer. *Annals of Translational Medicine, 10*(4), 169. https://doi.org/10.21037/atm-21-6126
+
+18. Wang, W., Li, Q., Yang, T., Bai, G., Li, D., Li, Q., & Sun, H. (2012). Expression of AQP5 and AQP8 in human colorectal carcinoma and their clinical significance. *World Journal of Surgical Oncology, 10*, 242. https://doi.org/10.1186/1477-7819-10-242
+
+19. Wei, L., Chen, W., Zhao, J., Fang, Y., & Lin, J. (2020). Downregulation of CLCA4 expression is associated with the development and progression of colorectal cancer. Oncology Letters, 20(1), 631–638.
+
+20. Wu, Q., Yang, Z. F., Wang, K. J., Feng, X. Y., Lv, Z. J., Li, Y., & Jian, Z. X. (2018). AQP8 inhibits colorectal cancer growth and metastasis by down-regulating PI3K/AKT signaling and PCDH7 expression. *American journal of cancer research, 8*(2), 266–279. https://doi.org/10.3892/ol.2020.11640
+
+21. Yi, Q., Zhu, G., Zhu, W., Wang, J., Ouyang, X., Yang, K., & Zhong, J. (2024). Oncogenic mechanisms of COL10A1 in cancer and clinical challenges (Review). *Oncology Reports, 52*(6), Article 162. https://doi.org/10.3892/or.2024.8821
+
+22. Zhang, X., Zhang, H., Fan, C., Hildesjö, C., Shen, B., & Sun, X.-F. (2022). Loss of CHGA Protein as a Potential Biomarker for Colon Cancer Diagnosis: A Study on Biomarker Discovery by Machine Learning and Confirmation by Immunohistochemistry in Colorectal Cancer Tissue Microarrays. Cancers, 14(11), 2664. https://doi.org/10.3390/cancers14112664
+
