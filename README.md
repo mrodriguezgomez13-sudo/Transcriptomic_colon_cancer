@@ -46,8 +46,7 @@ install.packages(c("factoextra", "ggplot2"))
 ```
 # Download the data
 
-Follow the instructions in [`data/README.md`](data/README_data.md) to download and place the `.Rda` file in the `data/` folder.
----
+Follow the instructions in [`data/README_data.md`](data/README_data.md) to download and place the `.Rda` file in the `data/` folder.
 
 ## License
 
